@@ -1,11 +1,12 @@
 // .github/workflows/speedtest.js
 
-// 工具函数：sleep 延迟
+const fs = require('fs');
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// 核心测速函数：测量单个 IP 的响应时间
+// 测速单个 IP（返回延迟，单位 ms）
 async function measureLatency(ip) {
   const start = Date.now();
   const controller = new AbortController();
@@ -23,57 +24,90 @@ async function measureLatency(ip) {
   }
 }
 
-// 主函数
+// 从 HTML 表格中提取 IP 和对应的节点注释
+function extractIpsWithComments(html) {
+  // 简单正则匹配：<td>IP</td><td>节点</td> 或类似结构
+  // 实际网页结构为 <tr><td>IP地址</td><td>节点</td><td>测速1</td>...</tr>
+  // 我们用更稳健的方式：按行匹配
+  const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
+  const ipComments = [];
+  for (const row of rows) {
+    // 跳过表头
+    if (row.includes('IP地址') && row.includes('节点')) continue;
+    const cells = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi);
+    if (!cells || cells.length < 2) continue;
+    let ip = '', comment = '';
+    for (let i = 0; i < cells.length; i++) {
+      const cellText = cells[i].replace(/<[^>]*>/g, '').trim();
+      if (i === 0 && /^(\d{1,3}\.){3}\d{1,3}$/.test(cellText)) {
+        ip = cellText;
+      } else if (i === 1 && cellText) {
+        comment = cellText;
+        break; // 找到注释就停止
+      }
+    }
+    if (ip && comment) {
+      ipComments.push({ ip, comment });
+    }
+  }
+  return ipComments;
+}
+
 async function main() {
-  console.log('🚀 开始获取 IP 列表...');
+  console.log('🚀 开始获取 IP 及节点信息...');
   try {
-    // 1. 获取网页内容
+    // 1. 获取网页
     const response = await fetch('https://ip.164746.xyz/', {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     const html = await response.text();
 
-    // 2. 解析 HTML，提取所有 IPv4 地址
-    const ipRegex = /(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/g;
-    const allIps = [...new Set(html.match(ipRegex) || [])];
-    console.log(`📋 共提取到 ${allIps.length} 个 IP 地址`);
-    console.log(`🔍 IP 列表: ${allIps.join(', ')}`);
+    // 2. 提取 IP + 注释
+    const ipList = extractIpsWithComments(html);
+    console.log(`📋 共提取到 ${ipList.length} 个 IP（含注释）`);
+    if (ipList.length === 0) throw new Error('未提取到任何 IP 及注释');
 
-    if (allIps.length === 0) {
-      throw new Error('未从网页中提取到任何 IP');
-    }
-
-    // 3. 并发测速（限制并发数量为 15，避免触发限流）
+    // 3. 并发测速（限制并发数）
     const CONCURRENCY_LIMIT = 15;
     const results = [];
-    for (let i = 0; i < allIps.length; i += CONCURRENCY_LIMIT) {
-      const batch = allIps.slice(i, i + CONCURRENCY_LIMIT);
-      const batchPromises = batch.map(ip => measureLatency(ip));
+    for (let i = 0; i < ipList.length; i += CONCURRENCY_LIMIT) {
+      const batch = ipList.slice(i, i + CONCURRENCY_LIMIT);
+      const batchPromises = batch.map(item => measureLatency(item.ip));
       const batchResults = await Promise.all(batchPromises);
-      results.push(...batchResults);
-      await sleep(500); // 批次间延迟
+      // 合并注释信息
+      for (let j = 0; j < batch.length; j++) {
+        if (batchResults[j].success) {
+          results.push({
+            ip: batchResults[j].ip,
+            latency: batchResults[j].latency,
+            comment: batch[j].comment
+          });
+        }
+      }
+      await sleep(500);
     }
 
-    // 4. 筛选出成功的 IP，并按延迟从小到大排序
-    const successful = results.filter(r => r.success).sort((a, b) => a.latency - b.latency);
-    const fastest = successful.slice(0, 5);
+    // 4. 排序取最快 5 个
+    results.sort((a, b) => a.latency - b.latency);
+    const fastest = results.slice(0, 5);
 
-    // 5. 输出最终结果
-    console.log('🏆 最快的 5 个 IP:');
-    fastest.forEach((ip, idx) => {
-      console.log(`   ${idx + 1}. ${ip.ip} (${ip.latency}ms)`);
+    console.log('🏆 最快的 5 个 IP（含注释）:');
+    fastest.forEach((item, idx) => {
+      console.log(`   ${idx+1}. ${item.ip}  #${item.comment}  (${item.latency}ms)`);
     });
 
-    // 可选：将结果保存为文件，供后续步骤使用
-    const fs = require('fs');
+    // 5. 写入目标文件（格式：IP#注释）
+    const outputLines = fastest.map(item => `${item.ip}#${item.comment}`);
+    fs.writeFileSync('fastest-ips.txt', outputLines.join('\n') + '\n');
+    console.log('💾 结果已写入 fastest-ips.txt');
+
+    // 可选：同时生成 JSON 便于其他用途
     fs.writeFileSync('fastest-ips.json', JSON.stringify(fastest, null, 2));
-    console.log('💾 结果已保存至 fastest-ips.json');
-    
+
   } catch (error) {
     console.error('❌ 脚本运行失败:', error);
     process.exit(1);
   }
 }
 
-// 执行主函数
 main();
