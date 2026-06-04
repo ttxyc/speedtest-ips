@@ -2,54 +2,68 @@
 
 const fs = require('fs');
 
-// 从 HTML 纯文本内容中直接提取 IP、速度和优选标识
-function extractDataFromText(html) {
-    // 1. 提取出包含测速数据的主要文本块
-    // 查找 "IP地址 | 已发送 ..." 这个表头之后的内容
-    const tableHeader = "IP地址 | 已发送 | 已接收 | 丢包率 | 平均延迟 | 下载速度 | 测速时间";
-    const startIndex = html.indexOf(tableHeader);
-    if (startIndex === -1) {
-        console.log("❌ 未找到数据表格的表头");
+// 解析 HTML 表格，提取 IP、下载速度和优选标识
+function parseHtmlTable(html) {
+    const ipData = [];
+    
+    // 1. 找到表格体 <tbody> 中的每一行 <tr>
+    const tbodyMatch = html.match(/<tbody>([\s\S]*?)<\/tbody>/i);
+    if (!tbodyMatch) {
+        console.log("❌ 未找到表格体 <tbody>");
         return [];
     }
-
-    // 从表头开始，截取到文本末尾
-    const dataText = html.substring(startIndex);
     
-    // 2. 按行分割
-    const lines = dataText.split(/\r?\n/);
-    const ipData = [];
-
-    for (const line of lines) {
-        // 跳过表头行和空行
-        if (line.includes('IP地址') || line.trim() === '') continue;
+    const tbodyContent = tbodyMatch[1];
+    const rowRegex = /<tr>([\s\S]*?)<\/tr>/gi;
+    let rowMatch;
+    
+    while ((rowMatch = rowRegex.exec(tbodyContent)) !== null) {
+        const rowHtml = rowMatch[1];
         
-        // 匹配数据行：例如 "★ 172.64.53.41 复制  | 4 | 4 | 0.00% | 49.41 | 63.46MB/s | ..."
-        // 正则表达式解释：
-        // ^\s*                    - 行首的空白
-        // (?:★\s*)?              - 可选的 ★ 符号
-        // (\d+\.\d+\.\d+\.\d+)   - 捕获 IP 地址
-        // \s*复制\s*             - 中间的 "复制" 文字
-        // \|\s*(\d+)\s*\|        - 捕获 "已发送" 数值（这里用不到，但用于定位）
-        // ... 中间跳过几列 ...
-        // \|\s*([\d.]+MB/s)\s*\| - 捕获下载速度，例如 "63.46MB/s"
-        const match = line.match(/^\s*(?:★\s*)?(\d+\.\d+\.\d+\.\d+)\s*复制\s*\|\s*\d+\s*\|\s*\d+\s*\|\s*[\d.]+\%\s*\|\s*[\d.]+\s*\|\s*([\d.]+MB\/s)\s*\|/);
+        // 提取所有单元格 <td> 的内容
+        const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+        const cells = [];
+        let cellMatch;
         
-        if (match) {
-            const ip = match[1];
-            const speedRaw = match[2];
-            // 提取速度数值
-            const speedValue = parseFloat(speedRaw);
-            
-            // 判断是否为优选节点（行首有 ★）
-            const isPreferred = line.trim().startsWith('★');
-            const remark = isPreferred ? 'CF优选节点' : 'CF节点';
-            
+        while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+            let cellContent = cellMatch[1];
+            // 清理单元格内的 HTML 标签，但保留特殊标记（如 ★）
+            cellContent = cellContent.replace(/<a[^>]*>([\s\S]*?)<\/a>/gi, '$1')
+                                     .replace(/<span[^>]*>([\s\S]*?)<\/span>/gi, '$1')
+                                     .replace(/<button[^>]*>([\s\S]*?)<\/button>/gi, '')
+                                     .replace(/<span[^>]*class="copy-btn"[^>]*>[\s\S]*?<\/span>/gi, '')
+                                     .trim();
+            cells.push(cellContent);
+        }
+        
+        // 需要至少 7 列数据（IP, 已发送, 已接收, 丢包率, 平均延迟, 下载速度, 测速时间）
+        if (cells.length < 7) continue;
+        
+        // 第1列是 IP 地址（可能包含 ★ 和 "复制" 文字）
+        let ipColumn = cells[0];
+        // 提取 IP 地址（正则匹配）
+        const ipMatch = ipColumn.match(/(\d{1,3}\.){3}\d{1,3}/);
+        if (!ipMatch) continue;
+        const ip = ipMatch[0];
+        
+        // 检查是否为优选节点（第一列是否包含 ★）
+        const isPreferred = ipColumn.includes('★');
+        const remark = isPreferred ? 'CF优选节点' : 'CF节点';
+        
+        // 第6列是下载速度（索引5），例如 "63.46MB/s"
+        let speedColumn = cells[5] || '';
+        let speedMBps = 0;
+        const speedMatch = speedColumn.match(/([\d.]+)\s*MB\/s/i);
+        if (speedMatch) {
+            speedMBps = parseFloat(speedMatch[1]);
+        }
+        
+        if (speedMBps > 0) {
             ipData.push({
                 ip: ip,
                 comment: remark,
-                speedMBps: speedValue,
-                rawSpeed: speedRaw
+                speedMBps: speedMBps,
+                rawSpeed: speedColumn
             });
         }
     }
@@ -72,12 +86,12 @@ async function main() {
         
         console.log(`📄 获取到 HTML，长度: ${html.length} 字符`);
         
-        // 2. 从文本中提取数据
-        const ipData = extractDataFromText(html);
+        // 2. 解析 HTML 表格数据
+        const ipData = parseHtmlTable(html);
         
         if (ipData.length === 0) {
             console.log('❌ 未提取到任何 IP 速度数据');
-            console.log('💡 提示: 请检查网页源码中的数据格式是否发生变化');
+            console.log('💡 提示: 请检查网页中的表格结构是否与脚本匹配');
             process.exit(1);
         }
         
