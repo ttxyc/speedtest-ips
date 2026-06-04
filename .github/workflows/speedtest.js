@@ -2,64 +2,78 @@
 
 const fs = require('fs');
 
-// 解析纯文本表格，提取 IP、备注和下载速度
-function parseTextTable(html) {
+// 解析 Markdown 风格表格，提取 IP、备注和下载速度
+function parseMarkdownTable(html) {
     // 按行分割
     const lines = html.split(/\r?\n/);
     const ipData = [];
+    let isInsideTable = false;
 
     for (const line of lines) {
-        // 跳过表头、空行和分隔线
-        if (line.includes('IP地址') || line.includes('---') || line.trim() === '') {
+        const trimmedLine = line.trim();
+        
+        // 检测表格开始（包含 "IP地址" 和 "|" 的行）
+        if (trimmedLine.includes('IP地址') && trimmedLine.includes('|')) {
+            isInsideTable = true;
             continue;
         }
-
-        // 匹配行的主要部分：IP地址、备注、下载速度等
-        // 格式示例：| ★ 172.64.53.41 复制  | 4 | 4 | 0.00% | 49.41 | 63.46MB/s | ... |
-        // 或者：| 108.162.198.63 复制  | 4 | 4 | 0.00% | 57.99 | 46.66MB/s | ... |
-        const parts = line.split('|').map(part => part.trim());
-        if (parts.length < 6) continue; // 至少需要 IP 和速度列
-
-        // 第一列是 IP 和可能的备注（如 ★ 和 "复制"）
-        let ipColumn = parts[1];
-        // 移除以 "★" 和 "复制" 为代表的特殊字符
-        let ip = ipColumn.replace(/[★☆]/g, '').replace(/复制/g, '').trim();
         
-        // 验证 IP 格式
-        const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
-        if (!ipRegex.test(ip)) continue;
-
-        // 查找备注：如果 IP 列包含 ★，则提取它作为备注的一部分
-        let remark = 'CF节点';
-        if (ipColumn.includes('★')) {
-            remark = '优选节点';
-        } else {
-            remark = '普通节点';
+        // 跳过表格分隔线（例如 |---|---|---|---|---|---|---|）
+        if (isInsideTable && trimmedLine.includes('---') && trimmedLine.includes('|')) {
+            continue;
         }
-
-        // 第6列（索引5）是 "下载速度" 列
-        let speedColumn = parts.length > 5 ? parts[5] : '';
-        let speedMBps = 0;
         
-        if (speedColumn) {
-            // 提取速度数值，例如 "63.46MB/s" -> 63.46
-            const speedMatch = speedColumn.match(/^([\d.]+)/);
-            if (speedMatch) {
-                speedMBps = parseFloat(speedMatch[1]);
+        // 如果已经在表格内，并且当前行以 '|' 开头或包含 '|'，则解析
+        if (isInsideTable && trimmedLine.startsWith('|') && trimmedLine.includes('|')) {
+            // 按 '|' 分割并清理每个单元格
+            const cells = trimmedLine.split('|').map(cell => cell.trim()).filter(cell => cell !== '');
+            
+            if (cells.length >= 6) {
+                // 第一列是 IP 地址（可能包含 ★ 和 "复制"）
+                let ipColumn = cells[0];
+                // 移除特殊符号和文字
+                let ip = ipColumn.replace(/[★☆]/g, '').replace(/复制/g, '').trim();
+                
+                // 验证 IP 格式
+                const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+                if (!ipRegex.test(ip)) {
+                    continue;
+                }
+                
+                // 确定备注（是否优选）
+                let remark = 'CF节点';
+                if (ipColumn.includes('★')) {
+                    remark = 'CF优选节点';
+                }
+                
+                // 第6列（索引5）是下载速度
+                let speedColumn = cells.length > 5 ? cells[5] : '';
+                let speedMBps = 0;
+                
+                if (speedColumn) {
+                    // 提取速度数值，例如 "63.46MB/s" -> 63.46
+                    const speedMatch = speedColumn.match(/^([\d.]+)/);
+                    if (speedMatch) {
+                        speedMBps = parseFloat(speedMatch[1]);
+                    }
+                }
+                
+                // 只记录有有效速度的 IP
+                if (speedMBps > 0) {
+                    ipData.push({
+                        ip: ip,
+                        comment: remark,
+                        speedMBps: speedMBps,
+                        rawSpeed: speedColumn
+                    });
+                }
             }
         }
-
-        if (speedMBps === 0) {
-            console.log(`⚠️ 跳过 ${ip} (${remark})，无有效下载速度`);
-            continue;
+        
+        // 检测表格结束（遇到空行或非表格行）
+        if (isInsideTable && trimmedLine === '') {
+            isInsideTable = false;
         }
-
-        ipData.push({
-            ip: ip,
-            comment: remark,
-            speedMBps: speedMBps,
-            rawSpeed: speedColumn
-        });
     }
     
     return ipData;
@@ -78,12 +92,12 @@ async function main() {
         });
         const html = await response.text();
         
-        // 调试：保存 HTML 以便排查问题（可选）
-        // fs.writeFileSync('debug.html', html);
-        // console.log('HTML 前500字符:', html.substring(0, 500));
+        // 调试：打印 HTML 长度和开头部分
+        console.log(`📄 获取到 HTML，长度: ${html.length} 字符`);
+        console.log('📄 HTML 开头 300 字符:', html.substring(0, 300));
         
-        // 2. 解析文本表格数据
-        const ipData = parseTextTable(html);
+        // 2. 解析表格数据
+        const ipData = parseMarkdownTable(html);
         
         if (ipData.length === 0) {
             console.log('❌ 未提取到任何 IP 速度数据');
@@ -101,14 +115,13 @@ async function main() {
         
         console.log('\n🏆 下载速度最快的 5 个 IP:');
         fastest.forEach((item, idx) => {
-            console.log(`   ${idx+1}. ${item.ip}  # ${item.speedMBps.toFixed(2)} MB/s  # ${item.comment} (原始: ${item.rawSpeed})`);
+            console.log(`   ${idx+1}. ${item.ip}  # ${item.speedMBps.toFixed(2)} MB/s  # ${item.comment}`);
         });
         
         // 5. 写入文件（格式：IP#速度MB/s#备注）
         const outputLines = fastest.map(item => `${item.ip}#${item.speedMBps.toFixed(2)} MB/s#${item.comment}`);
         fs.writeFileSync('fastest-ips.txt', outputLines.join('\n') + '\n');
         console.log('\n💾 结果已写入 fastest-ips.txt');
-        console.log('📄 格式: IP#下载速度#备注');
         
         // 同时输出 JSON 格式
         fs.writeFileSync('fastest-ips.json', JSON.stringify(fastest, null, 2));
