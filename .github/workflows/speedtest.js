@@ -2,123 +2,91 @@
 
 const fs = require('fs');
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// 下载测速：下载一个小文件，计算实际速度 (Mbps)
-async function measureDownloadSpeed(ip, testFileSizeMB = 0.5) {
-  // 使用一个常见的测速文件路径（根据实际网站调整）
-  // 通常 CDN 测试会使用 /speedtest/random400x400.jpg 或类似路径
-  const testUrl = `http://${ip}/speedtest/random400x400.jpg`;
-  // 或者使用一个固定大小的测试文件（如果存在）
-  // const testUrl = `http://${ip}/100kb.bin`;
+// 从 HTML 表格中提取 IP、节点注释和各测速列的速度值
+function extractIpSpeedData(html) {
+  // 匹配所有表格行
+  const rowRegex = /<tr[^>]*>[\s\S]*?<\/tr>/gi;
+  const rows = html.match(rowRegex) || [];
   
-  const start = Date.now();
-  let totalBytes = 0;
+  const ipData = [];
   
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+  for (const row of rows) {
+    // 跳过表头行
+    if (row.includes('IP地址') && row.includes('节点')) continue;
     
-    const response = await fetch(testUrl, {
-      method: 'GET',
-      signal: controller.signal
+    // 提取所有单元格内容
+    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    const cells = [];
+    let cellMatch;
+    while ((cellMatch = cellRegex.exec(row)) !== null) {
+      // 清理 HTML 标签和空白
+      let content = cellMatch[1].replace(/<[^>]*>/g, '').trim();
+      cells.push(content);
+    }
+    
+    if (cells.length < 3) continue;
+    
+    // 第1列：IP地址
+    const ip = cells[0];
+    // 验证是否是有效的 IP 格式
+    const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (!ipRegex.test(ip)) continue;
+    
+    // 第2列：节点注释
+    const comment = cells[1] || 'CDN节点';
+    
+    // 收集所有速度列（从第3列开始，跳过空值）
+    const speeds = [];
+    for (let i = 2; i < cells.length; i++) {
+      const speedText = cells[i];
+      if (speedText && speedText !== '-' && speedText !== 'N/A' && speedText !== '') {
+        // 尝试解析速度数值（例如 "1.23 MB/s" 或 "1234 KB/s"）
+        const speedMatch = speedText.match(/([\d.]+)\s*([KM]B\/s)/i);
+        if (speedMatch) {
+          let value = parseFloat(speedMatch[1]);
+          const unit = speedMatch[2].toUpperCase();
+          
+          // 统一转换为 MB/s
+          if (unit === 'KB/S') {
+            value = value / 1024;
+          }
+          
+          speeds.push(value);
+        } else {
+          // 尝试直接解析数字
+          const numMatch = speedText.match(/[\d.]+/);
+          if (numMatch) {
+            speeds.push(parseFloat(numMatch[0]));
+          }
+        }
+      }
+    }
+    
+    if (speeds.length === 0) {
+      console.log(`⚠️ ${ip} (${comment}) - 无有效速度数据`);
+      continue;
+    }
+    
+    // 取所有速度列的平均值作为最终速度
+    const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+    
+    ipData.push({
+      ip: ip,
+      comment: comment,
+      speedMBps: avgSpeed,
+      speeds: speeds  // 保留原始速度数组用于调试
     });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const reader = response.body.getReader();
-    let bytesReceived = 0;
-    
-    // 读取数据直到完成或达到最大时间
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytesReceived += value.length;
-      totalBytes = bytesReceived;
-      
-      // 如果下载超过 5 秒且已收到足够数据，可以提前结束
-      const elapsed = (Date.now() - start) / 1000;
-      if (elapsed > 5 && totalBytes > 500 * 1024) break;
-    }
-    
-    clearTimeout(timeoutId);
-    const elapsedSeconds = (Date.now() - start) / 1000;
-    
-    if (elapsedSeconds === 0 || totalBytes === 0) {
-      throw new Error('下载数据为空');
-    }
-    
-    // 计算速度：字节数 * 8 / 时间(秒) / 1,000,000 = Mbps
-    const speedMbps = (totalBytes * 8) / elapsedSeconds / 1000000;
-    
-    console.log(`✅ ${ip} - ${speedMbps.toFixed(2)} Mbps (${(totalBytes / 1024).toFixed(0)}KB / ${elapsedSeconds.toFixed(2)}s)`);
-    return { ip, speedMbps, success: true, totalBytes, elapsedSeconds };
-    
-  } catch (error) {
-    console.log(`❌ ${ip} - 下载失败: ${error.message}`);
-    return { ip, speedMbps: 0, success: false };
-  }
-}
-
-// 从 HTML 中提取 IP 和对应的注释
-function extractIpsWithComments(html) {
-  const ipRegex = /(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/g;
-  const allMatches = [...html.matchAll(ipRegex)];
-  
-  if (allMatches.length === 0) return [];
-  
-  const ipComments = [];
-  const visitedIps = new Set();
-  
-  for (const match of allMatches) {
-    const ip = match[0];
-    if (visitedIps.has(ip)) continue;
-    visitedIps.add(ip);
-    
-    const startPos = Math.max(0, match.index - 200);
-    const endPos = Math.min(html.length, match.index + 200);
-    const context = html.substring(startPos, endPos);
-    
-    let comment = 'CDN节点';
-    
-    // 查找中文注释
-    const tdMatch = context.match(/<\/td>\s*<td[^>]*>([^<]+)</i) || 
-                    context.match(/<td[^>]*>([^<]+)<\/td>\s*<td[^>]*>/i);
-    if (tdMatch && tdMatch[1] && tdMatch[1].trim()) {
-      comment = tdMatch[1].trim();
-    } else {
-      const chineseMatch = context.match(/[\u4e00-\u9fa5]{2,}/);
-      if (chineseMatch) comment = chineseMatch[0];
-      
-      const englishMatch = context.match(/CF\s+\w+|移动|联通|电信|优选|普通/i);
-      if (englishMatch) comment = englishMatch[0];
-    }
-    
-    comment = comment.replace(/<[^>]*>/g, '').trim();
-    if (comment.length > 50) comment = comment.substring(0, 50);
-    if (!comment || comment.length === 0) comment = 'CDN节点';
-    
-    ipComments.push({ ip, comment });
   }
   
-  console.log(`📋 提取到 ${ipComments.length} 个 IP（含注释）`);
-  if (ipComments.length > 0) {
-    console.log(`   示例: ${ipComments[0].ip} -> ${ipComments[0].comment}`);
-  }
-  
-  return ipComments;
+  return ipData;
 }
 
 async function main() {
-  console.log('🚀 开始获取 IP 并测试下载速度...');
-  console.log('📊 将测试各节点的实际下载速度 (Mbps)');
+  console.log('🚀 开始获取 IP 及下载速度数据...');
   
   try {
     // 1. 获取网页
+    console.log('📡 正在获取网页数据: https://ip.164746.xyz/');
     const response = await fetch('https://ip.164746.xyz/', {
       headers: { 
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -126,66 +94,45 @@ async function main() {
     });
     const html = await response.text();
     
-    // 2. 提取 IP + 注释
-    let ipList = extractIpsWithComments(html);
-    if (ipList.length === 0) {
-      const ipRegex = /(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/g;
-      const ips = [...new Set(html.match(ipRegex) || [])];
-      if (ips.length === 0) throw new Error('未提取到任何 IP');
-      
-      console.log(`⚠️ 未找到注释，使用默认注释，共 ${ips.length} 个 IP`);
-      ipList = ips.map(ip => ({ ip, comment: 'CDN节点' }));
+    // 调试：保存 HTML 以便排查问题（可选）
+    // fs.writeFileSync('debug.html', html);
+    // console.log('HTML 长度:', html.length);
+    
+    // 2. 解析表格数据
+    const ipData = extractIpSpeedData(html);
+    
+    if (ipData.length === 0) {
+      console.log('❌ 未提取到任何 IP 速度数据');
+      console.log('💡 提示: 网页结构可能发生了变化，请检查网页源代码');
+      process.exit(1);
     }
     
-    // 限制最多测试 30 个 IP，避免时间过长
-    if (ipList.length > 30) {
-      console.log(`⚠️ IP 数量过多 (${ipList.length})，随机选取 30 个进行测试`);
-      ipList = ipList.sort(() => 0.5 - Math.random()).slice(0, 30);
-    }
+    console.log(`📋 成功提取到 ${ipData.length} 个 IP 的速度数据`);
     
-    // 3. 并发测速（限制并发数，避免网络拥堵）
-    const CONCURRENCY_LIMIT = 3;  // 下载测速并发数要小一些
-    const results = [];
+    // 3. 按下载速度从高到低排序（MB/s）
+    ipData.sort((a, b) => b.speedMBps - a.speedMBps);
     
-    for (let i = 0; i < ipList.length; i += CONCURRENCY_LIMIT) {
-      const batch = ipList.slice(i, i + CONCURRENCY_LIMIT);
-      console.log(`\n📡 测试批次 ${Math.floor(i/CONCURRENCY_LIMIT)+1}/${Math.ceil(ipList.length/CONCURRENCY_LIMIT)}`);
-      
-      const batchPromises = batch.map(item => measureDownloadSpeed(item.ip));
-      const batchResults = await Promise.all(batchPromises);
-      
-      for (let j = 0; j < batch.length; j++) {
-        if (batchResults[j].success && batchResults[j].speedMbps > 0) {
-          results.push({
-            ip: batchResults[j].ip,
-            speedMbps: batchResults[j].speedMbps,
-            comment: batch[j].comment
-          });
-        }
-      }
-      await sleep(2000); // 批次间延迟2秒
-    }
-    
-    if (results.length === 0) {
-      throw new Error('所有 IP 测速均失败');
-    }
-    
-    // 4. 按下载速度从高到低排序，取最快的 5 个
-    results.sort((a, b) => b.speedMbps - a.speedMbps);
-    const fastest = results.slice(0, 5);
+    // 4. 取最快的 5 个
+    const fastest = ipData.slice(0, 5);
     
     console.log('\n🏆 下载速度最快的 5 个 IP:');
     fastest.forEach((item, idx) => {
-      console.log(`   ${idx+1}. ${item.ip}  # ${item.speedMbps.toFixed(2)} Mbps  # ${item.comment}`);
+      console.log(`   ${idx+1}. ${item.ip}  # ${item.speedMBps.toFixed(2)} MB/s  # ${item.comment}`);
     });
     
-    // 5. 写入文件（格式：IP#下载速度 Mbps#注释）
-    const outputLines = fastest.map(item => `${item.ip}#${item.speedMbps.toFixed(2)} Mbps#${item.comment}`);
+    // 5. 输出全部 IP 的速度（可选，用于调试）
+    console.log('\n📊 所有 IP 速度排名:');
+    ipData.forEach((item, idx) => {
+      console.log(`   ${idx+1}. ${item.ip} - ${item.speedMBps.toFixed(2)} MB/s - ${item.comment}`);
+    });
+    
+    // 6. 写入文件（格式：IP#速度MB/s#注释）
+    const outputLines = fastest.map(item => `${item.ip}#${item.speedMBps.toFixed(2)} MB/s#${item.comment}`);
     fs.writeFileSync('fastest-ips.txt', outputLines.join('\n') + '\n');
     console.log('\n💾 结果已写入 fastest-ips.txt');
     console.log('📄 格式: IP#下载速度#注释');
     
-    // 可选：输出 JSON
+    // 同时输出 JSON 格式
     fs.writeFileSync('fastest-ips.json', JSON.stringify(fastest, null, 2));
     
   } catch (error) {
