@@ -1,0 +1,26 @@
+# .github/workflows/speedtest-ips.yml
+name: 🚀 CDN IP Speed Test  # 工作流名称
+
+# 触发方式：支持手动、定时（每 6 小时）和代码推送
+on:
+  workflow_dispatch:         # 手动触发
+  schedule:
+    - cron: '0 */6 * * *'    # 每 6 小时运行一次，使用 UTC 时间
+  push:
+    branches:
+      - main
+
+jobs:
+  test-ips:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 🧪 Run IP speed test and get fastest IPs
+        run: node .github/workflows/speedtest.js
