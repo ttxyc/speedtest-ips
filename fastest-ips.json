@@ -1,20 +1,20 @@
 [
   {
-    "ip": "172.64.158.98",
+    "ip": "172.64.150.127",
     "comment": "CF优选节点",
-    "speedMBps": 0.14,
-    "rawSpeed": "0.14MB/s"
+    "speedMBps": 50.81,
+    "rawSpeed": "50.81MB/s"
   },
   {
-    "ip": "172.64.145.108",
+    "ip": "104.18.37.162",
     "comment": "CF优选节点",
-    "speedMBps": 0.06,
-    "rawSpeed": "0.06MB/s"
+    "speedMBps": 42.88,
+    "rawSpeed": "42.88MB/s"
   },
   {
-    "ip": "172.64.154.166",
+    "ip": "104.18.44.55",
     "comment": "CF节点",
-    "speedMBps": 0.05,
-    "rawSpeed": "0.05MB/s"
+    "speedMBps": 21.43,
+    "rawSpeed": "21.43MB/s"
   }
 ]
